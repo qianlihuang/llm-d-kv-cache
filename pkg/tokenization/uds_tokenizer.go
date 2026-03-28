@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	tokenizerpb "github.com/llm-d/llm-d-kv-cache/api/tokenizerpb"
+	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
 	types "github.com/llm-d/llm-d-kv-cache/pkg/tokenization/types"
 	"github.com/llm-d/llm-d-kv-cache/pkg/utils/logging"
 )
@@ -141,6 +142,10 @@ func NewUdsTokenizer(ctx context.Context, config *UdsTokenizerConfig, modelName 
 		return nil, fmt.Errorf("failed to initialize tokenizer for model %s: %w", modelName, err)
 	}
 
+	// Warm up the renderer with a minimal request to force any lazy
+	// downloads (e.g. image processor configs for multimodal models).
+	udsTokenizer.warmup(ctx)
+
 	return udsTokenizer, nil
 }
 
@@ -185,6 +190,29 @@ func (u *UdsTokenizer) initializeTokenizerForModel(ctx context.Context) error {
 
 	return fmt.Errorf("tokenizer initialization failed after %d attempts: %w", maxRetries, lastErr)
 }
+
+// warmup sends a minimal text request to force any lazy downloads in the
+// renderer (e.g. image processor configs for multimodal models). Failures
+// are logged but not fatal — the first real request will retry.
+func (u *UdsTokenizer) warmup(ctx context.Context) {
+	warmupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	addGen := true
+	_, err := u.client.RenderChatCompletion(warmupCtx, &tokenizerpb.RenderChatCompletionRequest{
+		ModelName: u.model,
+		Messages: []*tokenizerpb.ChatMessage{{
+			Role:    "user",
+			Content: strPtr("warmup"),
+		}},
+		AddGenerationPrompt: &addGen,
+	})
+	if err != nil {
+		log.FromContext(ctx).V(logging.DEBUG).Info("Renderer warmup failed (non-critical)", "model", u.model, "error", err)
+	}
+}
+
+func strPtr(s string) *string { return &s }
 
 // Render tokenizes a plain-text prompt via the UDS renderer service.
 func (u *UdsTokenizer) Render(prompt string) ([]uint32, []types.Offset, error) {
@@ -247,10 +275,10 @@ func (u *UdsTokenizer) Encode(prompt string, addSpecialTokens bool) ([]uint32, [
 
 // RenderChat renders a chat completion request using the UDS renderer service.
 // It calls the RenderChatCompletion RPC which runs vLLM's OpenAIServingRender
-// on the CPU, returning token IDs directly.
+// on the CPU, returning token IDs and optional multimodal features.
 func (u *UdsTokenizer) RenderChat(
 	renderReq *types.RenderChatRequest,
-) ([]uint32, []types.Offset, error) {
+) ([]uint32, *MultiModalFeatures, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
 	defer cancel()
 
@@ -322,7 +350,41 @@ func (u *UdsTokenizer) RenderChat(
 		return nil, nil, fmt.Errorf("render chat completion failed: %s", resp.ErrorMessage)
 	}
 
-	return resp.TokenIds, nil, nil
+	var features *MultiModalFeatures
+	if resp.Features != nil {
+		features = convertProtoFeatures(resp.Features)
+	}
+
+	return resp.TokenIds, features, nil
+}
+
+// convertProtoFeatures converts proto MultiModalFeatures to domain type.
+func convertProtoFeatures(pf *tokenizerpb.MultiModalFeatures) *MultiModalFeatures {
+	if pf == nil {
+		return nil
+	}
+
+	features := &MultiModalFeatures{
+		MMHashes:       make(map[string][]string, len(pf.MmHashes)),
+		MMPlaceholders: make(map[string][]kvblock.PlaceholderRange, len(pf.MmPlaceholders)),
+	}
+
+	for modality, sl := range pf.MmHashes {
+		features.MMHashes[modality] = sl.Values
+	}
+
+	for modality, pl := range pf.MmPlaceholders {
+		ranges := make([]kvblock.PlaceholderRange, len(pl.Ranges))
+		for i, r := range pl.Ranges {
+			ranges[i] = kvblock.PlaceholderRange{
+				Offset: int(r.Offset),
+				Length: int(r.Length),
+			}
+		}
+		features.MMPlaceholders[modality] = ranges
+	}
+
+	return features
 }
 
 func (u *UdsTokenizer) Type() string {

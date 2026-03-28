@@ -245,7 +245,7 @@ func (s *UDSTokenizerSuite) TestScoreTokensCacheHit() {
 	engineKeys, requestKeys := s.promptToEngineAndRequestKeys(tokens)
 	s.addEntriesToIndex(engineKeys, requestKeys, fakePodList)
 
-	pods, err := s.indexer.ScoreTokens(s.T().Context(), tokens, defaultModelName, fakePodList)
+	pods, err := s.indexer.ScoreTokens(s.T().Context(), tokens, defaultModelName, fakePodList, nil)
 	s.Require().NoError(err)
 	s.T().Logf("ScoreTokens scores: %+v", pods)
 	s.Len(pods, len(fakePodList), "expected pod scores length to match candidate pods")
@@ -262,7 +262,7 @@ func (s *UDSTokenizerSuite) TestScoreTokensCacheMiss() {
 	s.Require().NoError(err)
 	s.Require().NotEmpty(tokens)
 
-	pods, err := s.indexer.ScoreTokens(s.T().Context(), tokens, defaultModelName, fakePodList)
+	pods, err := s.indexer.ScoreTokens(s.T().Context(), tokens, defaultModelName, fakePodList, nil)
 	s.Require().NoError(err)
 	s.T().Logf("ScoreTokens scores: %+v", pods)
 	s.Empty(pods, "expected no pod scores since no keys were added to the index")
@@ -286,7 +286,7 @@ func (s *UDSTokenizerSuite) TestScoreTokensConsistentWithGetPodScores() {
 	scoresFromPrompt, err := s.indexer.GetPodScores(s.T().Context(), nil, prompt, defaultModelName, fakePodList)
 	s.Require().NoError(err)
 
-	scoresFromTokens, err := s.indexer.ScoreTokens(s.T().Context(), tokens, defaultModelName, fakePodList)
+	scoresFromTokens, err := s.indexer.ScoreTokens(s.T().Context(), tokens, defaultModelName, fakePodList, nil)
 	s.Require().NoError(err)
 
 	s.Equal(scoresFromPrompt, scoresFromTokens,
@@ -313,7 +313,7 @@ func (s *UDSTokenizerSuite) TestScoreTokensPrefixReduction() {
 	shortTokens, _, err := s.tokenizer.Render(shortPrompt)
 	s.Require().NoError(err)
 
-	pods, err := s.indexer.ScoreTokens(s.T().Context(), shortTokens, defaultModelName, fakePodList)
+	pods, err := s.indexer.ScoreTokens(s.T().Context(), shortTokens, defaultModelName, fakePodList, nil)
 	s.Require().NoError(err)
 	s.Len(pods, len(fakePodList), "expected pod scores for short token prefix")
 	s.T().Logf("Short prefix scores: %+v", pods)

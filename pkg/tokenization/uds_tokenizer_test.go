@@ -39,6 +39,7 @@ type mockTokenizationServer struct {
 	tokenizeError   bool
 	chatError       bool
 	initialized     map[string]bool
+	mmFeatures      *tokenizerpb.MultiModalFeatures
 }
 
 func newMockTokenizationServer() *mockTokenizationServer {
@@ -122,11 +123,17 @@ func (m *mockTokenizationServer) RenderChatCompletion(
 		}
 	}
 
-	return &tokenizerpb.RenderChatCompletionResponse{
+	resp := &tokenizerpb.RenderChatCompletionResponse{
 		RequestId: "mock-request-id",
 		TokenIds:  tokens,
 		Success:   true,
-	}, nil
+	}
+
+	if m.mmFeatures != nil {
+		resp.Features = m.mmFeatures
+	}
+
+	return resp, nil
 }
 
 func (m *mockTokenizationServer) RenderCompletion(
@@ -309,10 +316,9 @@ func (s *UdsTokenizerTestSuite) TestUdsTokenizer_RenderChat() {
 		},
 	}
 
-	tokens, offsets, err := s.tokenizer.RenderChat(renderReq)
+	tokens, _, err := s.tokenizer.RenderChat(renderReq)
 	s.Require().NoError(err)
 	s.Assert().Greater(len(tokens), 0, "should return tokens from rendered chat")
-	s.Assert().Nil(offsets, "RenderChatCompletion does not return character offsets")
 }
 
 func (s *UdsTokenizerTestSuite) TestUdsTokenizer_Type() {
@@ -339,4 +345,57 @@ func (s *UdsTokenizerTestSuite) TestUdsTokenizer_RenderChatTemplateError() {
 	_, _, err := s.tokenizer.RenderChat(renderReq)
 	s.Assert().Error(err)
 	s.Assert().Contains(err.Error(), "render chat completion failed")
+}
+
+func (s *UdsTokenizerTestSuite) TestUdsTokenizer_RenderChatWithMultiModalFeatures() {
+	// Configure mock to return MM features.
+	s.mockServer.mmFeatures = &tokenizerpb.MultiModalFeatures{
+		MmHashes: map[string]*tokenizerpb.StringList{
+			"image": {Values: []string{"hash_img1", "hash_img2"}},
+		},
+		MmPlaceholders: map[string]*tokenizerpb.PlaceholderRangeList{
+			"image": {Ranges: []*tokenizerpb.PlaceholderRange{
+				{Offset: 10, Length: 100},
+				{Offset: 120, Length: 80},
+			}},
+		},
+	}
+
+	renderReq := &types.RenderChatRequest{
+		Conversation: []types.Conversation{
+			{Role: "user", Content: types.Content{Raw: "Describe these images"}},
+		},
+		AddGenerationPrompt: true,
+	}
+
+	tokens, features, err := s.tokenizer.RenderChat(renderReq)
+	s.Require().NoError(err)
+	s.Assert().Greater(len(tokens), 0)
+
+	// Verify MM features are propagated.
+	s.Require().NotNil(features, "multimodal features should be returned")
+	s.Require().Contains(features.MMHashes, "image")
+	s.Assert().Equal([]string{"hash_img1", "hash_img2"}, features.MMHashes["image"])
+
+	s.Require().Contains(features.MMPlaceholders, "image")
+	placeholders := features.MMPlaceholders["image"]
+	s.Require().Len(placeholders, 2)
+	s.Assert().Equal(10, placeholders[0].Offset)
+	s.Assert().Equal(100, placeholders[0].Length)
+	s.Assert().Equal(120, placeholders[1].Offset)
+	s.Assert().Equal(80, placeholders[1].Length)
+}
+
+func (s *UdsTokenizerTestSuite) TestUdsTokenizer_RenderChatTextOnlyNoFeatures() {
+	// Default mock has no mmFeatures set.
+	renderReq := &types.RenderChatRequest{
+		Conversation: []types.Conversation{
+			{Role: "user", Content: types.Content{Raw: "Hello"}},
+		},
+		AddGenerationPrompt: true,
+	}
+
+	_, features, err := s.tokenizer.RenderChat(renderReq)
+	s.Require().NoError(err)
+	s.Assert().Nil(features, "text-only request should have nil features")
 }
